@@ -1,0 +1,24 @@
+# 環境變數檔，通常包含敏感資訊
+.env
+
+# Airflow 或應用程式產生的日誌目錄
+logs/
+
+# 本地設定檔或暫存檔案（請確認 config 目錄內容是否需要版本控管）
+config/
+
+# __pycache__ 及 Python 編譯檔案
+__pycache__/
+*.pyc
+
+# Poetry 相關檔案
+poetry.lock
+pyproject.toml
+
+git_diff.txt
+
+# Jupyter Notebook
+*.ipynb
+
+# 其他常見暫存檔案
+*.swp
