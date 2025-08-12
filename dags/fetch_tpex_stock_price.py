@@ -49,6 +49,33 @@ def fetch_tpex_stock_data_dag():
         """,
     )
 
+    @task.branch
+    def check_if_data_exists(logical_date: datetime):
+        """
+        先檢查資料是否存在，若存在則跳過，若不存在則執行資料抓取。
+        """
+        execution_date_str = logical_date.date().strftime('%Y-%m-%d')
+        hook = PostgresHook(postgres_conn_id='PSQL_container')
+        
+        sql_query = f"SELECT count(*) FROM tw_stock_price WHERE trade_date = '{execution_date_str}' AND market = 'OTC';"
+        
+        try:
+            result = hook.get_first(sql_query)
+            count = result[0]
+            print("=" * 20)
+            print(f"Data count for {execution_date_str}: {count}")
+            
+            if count > 0:
+                print(f"Data for {execution_date_str} already exists. Skipping.")
+                return 'data_already_exists'  # 回傳要執行的任務 ID
+            else:
+                print(f"No data found for {execution_date_str}. Proceeding with data fetching.")
+                return 'data_not_found' # 回傳要執行的任務 ID
+            
+        except Exception as e:
+            print(f"Database check failed: {e}")
+            raise AirflowFailException(f"Database check failed: {e}")
+
     @task(execution_timeout=timedelta(minutes=1))
     def fetch_otc_price_task(logical_date: datetime):
         """
@@ -78,17 +105,12 @@ def fetch_tpex_stock_data_dag():
                 return AirflowFailException(f"Warning: Unexpected response format for {yyyymmdd}.")
             
             table = data['tables'][0]
-            print("=" * 50)
-            print("table", table)  # Debugging output
             if not table.get('data'):
                 print(f"No stock data found for {yyyymmdd}.")
                 return AirflowFailException(f"No stock data found for {yyyymmdd}.")
 
             df = pd.DataFrame(table['data'], columns=table['fields']).iloc[:, :-7]
             df.columns = df.columns.str.strip()
-            
-            print("=" * 50)
-            print(df.head())  # Debugging output
 
             # Data cleaning and type conversion
             # Using .apply(pd.to_numeric, errors='coerce') is more robust
@@ -119,10 +141,7 @@ def fetch_tpex_stock_data_dag():
                 raise AirflowFailException("Data contains NaN values after fillna.")
 
             print(f"Successfully fetched {len(df)} rows for date: {yyyymmdd}")
-            print("=" * 50)
-            print(df_cleaned.head())  # Debugging output
             
-            # Prepare data for insertion
             return df_cleaned.values.tolist()
 
         except requests.exceptions.RequestException as e:
@@ -162,7 +181,19 @@ def fetch_tpex_stock_data_dag():
             print(f"Failed to insert data into PostgreSQL: {e}")
             raise AirflowFailException(f"Database insertion failed: {e}")
             
-    # Task dependencies
-    create_table >> insert_to_postgres(fetch_otc_price_task())
+    @task
+    def data_already_exists():
+        print("Data for the current date already exists, so skipping data fetching and insertion.")
+        
+    @task
+    def data_not_found():
+        print("No data found for the current date.")
+
+    check_exists = check_if_data_exists()
+    fetched_data = fetch_otc_price_task()
+        
+    create_table >> check_exists
+    check_exists >> data_already_exists()
+    check_exists >> data_not_found() >> fetched_data >> insert_to_postgres(fetched_data)
 
 fetch_tpex_stock_data_dag()
