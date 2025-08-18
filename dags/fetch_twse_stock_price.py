@@ -5,18 +5,20 @@ import requests
 from airflow.decorators import dag, task
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.exceptions import AirflowFailException
+from airflow.exceptions import AirflowFailException, AirflowSkipException
+
+from utils.datasets import dataset_twse_stock
 
 @dag(
     'fetch_twse_stock_price',
     description='Fetch twse stock price and store in PSQL',
-    schedule='0 8 * * 1-5',
+    schedule='30 9 * * 1-5',
     start_date=datetime(2025, 1, 1),
     catchup=False,
     default_args={
         'owner': 'ivan',
         'retries': 2,
-        'retry_delay': timedelta(minutes=5),
+        'retry_delay': timedelta(minutes=3),
         'depends_on_past': False,
         'email_on_failure': False,
         'email_on_retry': False,
@@ -44,6 +46,7 @@ def fetch_twse_stock_data_dag():
                 close NUMERIC,
                 trade_date DATE,
                 market VARCHAR(10),
+
                 PRIMARY KEY (stock_id, trade_date)
             );
         """,
@@ -65,15 +68,14 @@ def fetch_twse_stock_data_dag():
             print("=" * 20)
             print(f"Data count for {execution_date_str}: {count}")
             
-            if count > 0:
+            if count >= 99:
                 print(f"Data for {execution_date_str} already exists. Skipping.")
-                return 'data_already_exists'  # 回傳要執行的任務 ID
+                return 'data_already_exists'
             else:
-                print(f"No data found for {execution_date_str}. Proceeding with data fetching.")
-                return 'data_not_found' # 回傳要執行的任務 ID
+                print(f"Data for {execution_date_str} is missing or has an abnormal count ({count}). Proceeding with data fetching.")
+                return 'data_not_found'
             
         except Exception as e:
-            print(f"Database check failed: {e}")
             raise AirflowFailException(f"Database check failed: {e}")
 
     @task
@@ -103,14 +105,12 @@ def fetch_twse_stock_data_dag():
             resp.raise_for_status()
             data = resp.json()
 
-            if data.get('stat').upper() != 'OK' or 'tables' not in data:
-                print(f"Warning: Unexpected response format for {yyyymmdd}. Response: {data}")
-                return AirflowFailException(f"Warning: Unexpected response format for {yyyymmdd}.")
+            if data.get('stat').upper() == '很抱歉，沒有符合條件的資料!':
+                raise AirflowSkipException(f"Warning: Unexpected response format for {yyyymmdd}. Response: {data}. Maybe holiday?")
             
             table = data['tables'][8]
             if not table.get('data'):
-                print(f"No stock data found for {yyyymmdd}.")
-                return AirflowFailException(f"No stock data found for {yyyymmdd}.")
+                raise AirflowFailException(f"No stock data found for {yyyymmdd}.")
 
             df = pd.DataFrame(table['data'], columns=table['fields']).iloc[:, :-7]
 
@@ -130,22 +130,19 @@ def fetch_twse_stock_data_dag():
 
             # 檢查是否還有 NaN
             if df.isnull().values.any():
-                print("Data contains NaN after fillna. Raising exception for logging.")
                 print(df[df.isnull().any(axis=1)])
-                raise AirflowFailException("Data contains NaN values after fillna.")
+                raise AirflowFailException("Data contains NaN values after fillna. Raising exception for logging.")
             
             print(f"Successfully fetched {len(df)} rows for date: {yyyymmdd}")
             
             return df[['證券代號', '證券名稱', '成交股數', '成交筆數', '成交金額', '開盤價', '最高價', '最低價', '收盤價', '交易日期', '市場別']].values.tolist()
 
         except requests.exceptions.RequestException as e:
-            print(f"Request failed for {yyyymmdd}: {e}")
-            raise AirflowFailException(f"API request failed: {e}")
+            raise AirflowFailException(f"API request failed for {yyyymmdd}: {e}")
         except (ValueError, IndexError, KeyError) as e:
-            print(f"Data parsing failed for {yyyymmdd}: {e}")
-            raise AirflowFailException(f"Data parsing failed: {e}")
+            raise AirflowFailException(f"Data parsing failed for {yyyymmdd}: {e}")
 
-    @task
+    @task(outlets=[dataset_twse_stock])
     def insert_to_postgres(records: list):
         """
         Inserts fetched stock data into the PostgreSQL table in batches.
@@ -172,8 +169,7 @@ def fetch_twse_stock_data_dag():
             )
             print(f"Successfully inserted {len(records)} rows into tw_stock_price.")
         except Exception as e:
-            print(f"Failed to insert data into PostgreSQL: {e}")
-            raise AirflowFailException(f"Database insertion failed: {e}")
+            raise AirflowFailException(f"PostgreSQL Database insertion failed: {e}")
             
     @task
     def data_already_exists():
