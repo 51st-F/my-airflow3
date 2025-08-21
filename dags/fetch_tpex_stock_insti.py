@@ -7,21 +7,24 @@ from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.exceptions import AirflowFailException, AirflowSkipException
 
+from utils.bot_telegram import send_task_telegram_notification, send_insert_success_notification
 from utils.datasets import dataset_tpex_stock
 
 @dag(
-    'fetch_tpex_stock_insti',
+    dag_id='fetch_tpex_stock_insti',
     description='Fetch tpex stock insti and store in PSQL',
-    schedule=[dataset_tpex_stock],
+    schedule='0 9 * * 1-5',
     start_date=datetime(2025, 1, 1),
     catchup=False,
+    max_active_runs=1,
     default_args={
         'owner': 'ivan',
-        'retries': 2,
-        'retry_delay': timedelta(minutes=30),
+        'retries': 1,
+        'retry_delay': timedelta(minutes=2),
         'depends_on_past': False,
         'email_on_failure': False,
         'email_on_retry': False,
+        'on_failure_callback': send_task_telegram_notification,
     },
     tags=['stock', 'tpex'],
 )
@@ -194,7 +197,7 @@ def fetch_tpex_stock_data_dag_insti_trading():
         except (ValueError, IndexError, KeyError) as e:
             raise AirflowFailException(f"Data parsing failed for {yyyymmdd}: {e}")
 
-    @task
+    @task(outlets=[dataset_tpex_stock])
     def insert_to_postgres(records: list):
         """
         Inserts fetched stock data into the PostgreSQL table in batches.
@@ -254,6 +257,8 @@ def fetch_tpex_stock_data_dag_insti_trading():
                 replace_index=['stock_id', 'trade_date']
             )
             print(f"Successfully inserted {len(records)} rows into tw_stock_price.")
+            return len(records)
+        
         except Exception as e:
             raise AirflowFailException(f"PostgreSQL Database insertion failed: {e}")
             
@@ -265,11 +270,16 @@ def fetch_tpex_stock_data_dag_insti_trading():
     def data_not_found():
         print("No data found for the current date.")
 
+    @task
+    def send_telegram_msg(inserted_count: int):
+        send_insert_success_notification(inserted_count)
+
     check_exists = check_if_data_exists()
     fetched_data = fetch_sii_insti_task()
+    insert_data = insert_to_postgres(fetched_data)
         
     create_table >> check_exists
     check_exists >> data_already_exists()
-    check_exists >> data_not_found() >> fetched_data >> insert_to_postgres(fetched_data)
+    check_exists >> data_not_found() >> fetched_data >> insert_data >> send_telegram_msg(insert_data)
     
 fetch_tpex_stock_data_dag_insti_trading()

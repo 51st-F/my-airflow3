@@ -7,21 +7,24 @@ from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.exceptions import AirflowFailException, AirflowSkipException
 
+from utils.bot_telegram import send_task_telegram_notification, send_insert_success_notification
 from utils.datasets import dataset_tpex_stock
 
 @dag(
-    'fetch_tpex_stock_price',
+    dag_id='fetch_tpex_stock_price',
     description='Fetch tpex stock price and store in PSQL',
-    schedule='0 9 * * 1-5',
+    schedule='45 8 * * 1-5',
     start_date=datetime(2025, 1, 1),
     catchup=False,
+    max_active_runs=1,
     default_args={
         'owner': 'ivan',
-        'retries': 2,
-        'retry_delay': timedelta(minutes=3),
+        'retries': 1,
+        'retry_delay': timedelta(minutes=2),
         'depends_on_past': False,
         'email_on_failure': False,
         'email_on_retry': False,
+        'on_failure_callback': send_task_telegram_notification,
     },
     tags=['stock', 'tpex'],
 )
@@ -53,10 +56,11 @@ def fetch_tpex_stock_data_dag():
     )
 
     @task.branch
-    def check_if_data_exists(logical_date: datetime):
+    def check_if_data_exists(**kwargs):
         """
         先檢查資料是否存在，若存在則跳過，若不存在則執行資料抓取。
         """
+        logical_date = kwargs['dag_run'].run_after
         execution_date_str = logical_date.date().strftime('%Y-%m-%d')
         hook = PostgresHook(postgres_conn_id='PSQL_container')
         
@@ -79,10 +83,11 @@ def fetch_tpex_stock_data_dag():
             raise AirflowFailException(f"Database check failed: {e}")
 
     @task(execution_timeout=timedelta(minutes=1))
-    def fetch_otc_price_task(logical_date: datetime):
+    def fetch_otc_price_task(**kwargs):
         """
         Fetches stock price data for all listed stocks on a given date.
         """
+        logical_date = kwargs['dag_run'].run_after
         index_date = logical_date.date()
         yyyymmdd = index_date.strftime('%Y%m%d')
         
@@ -174,6 +179,8 @@ def fetch_tpex_stock_data_dag():
                 replace_index=['stock_id', 'trade_date']
             )
             print(f"Successfully inserted {len(records)} rows into tw_stock_price.")
+            return len(records)
+        
         except Exception as e:
             raise AirflowFailException(f"PostgreSQL Database insertion failed: {e}")
             
@@ -185,11 +192,16 @@ def fetch_tpex_stock_data_dag():
     def data_not_found():
         print("No data found for the current date.")
 
+    @task
+    def send_telegram_msg(inserted_count: int):
+        send_insert_success_notification(inserted_count)
+
     check_exists = check_if_data_exists()
     fetched_data = fetch_otc_price_task()
+    insert_data = insert_to_postgres(fetched_data)
         
     create_table >> check_exists
     check_exists >> data_already_exists()
-    check_exists >> data_not_found() >> fetched_data >> insert_to_postgres(fetched_data)
+    check_exists >> data_not_found() >> fetched_data >> insert_data >> send_telegram_msg(insert_data)
 
 fetch_tpex_stock_data_dag()
