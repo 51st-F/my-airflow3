@@ -40,9 +40,9 @@ def send_insert_success_notification(inserted_count: int):
     execution_date = context['ts']
 
     message = (
-        f"✔️ *insert {inserted_count} rows*\n"
+        f"✔️ *+{inserted_count} rows*\n"
         f"`{run_id}`\n"
-        f"Dag: `{dag_id}`\n"
+        f"*Dag*: `{dag_id}`\n"
     )
 
     send_custom_telegram_message(message)
@@ -65,11 +65,10 @@ def send_task_telegram_notification(context):
     status_emoji = "✔️" if state == "success" else "❌"
 
     message = (
-        f"{status_emoji} *fail notify*\n"
+        f"{status_emoji} *fail instance retry* `{try_number}`\n"
         f"`{run_id}`\n"
         f"*Dag*: `{dag_id}`\n"
         f"*Task*: `{task_id}`\n"
-        f"*Retry*: `{try_number}`"
     )
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
